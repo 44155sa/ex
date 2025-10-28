@@ -10,14 +10,14 @@
 //         / /    \ \ ------- 
 //        / /      \ \ ----- 
 //       / /_ _ _   \ \ --- 
-//      /_ _ _ _ _\  \_\ -
+//      /_ _ _ _ _\  \_\
 //*********************************************************************** 
 // Author: suluyang 
 // Email:luyang.su@anlogic.com 
 // Date:2020/11/17 
 // Description: 
 // 2022/03/10:  修改时钟结构
-//              箢�化约杄1�7
+//              优化约束
 //              添加 soft fifo 
 //              添加 debug 功能
 // 2023/02/16 :add dynamic_local_ip_address port
@@ -48,10 +48,10 @@ module UDP_Example_Top(
     `ifdef DEBUG_UDP
       output wire         debug_out,
     `endif
-      output			HDMI_CLK_P,
-	  output			HDMI_D2_P,
-	  output			HDMI_D1_P,
-	  output			HDMI_D0_P,
+      output            HDMI_CLK_P,
+      output            HDMI_D2_P,
+      output            HDMI_D1_P,
+      output            HDMI_D0_P,
       
       input               cam_pclk,     
       input               cam_vsync,    
@@ -190,28 +190,19 @@ wire sdr_wr_en;//synthesis keep
 wire [31:0]sdr_wr_data;//synthesis keep 
 wire camser_fifo_re;
 wire Sdr_busy;
-wire video_clk;
 wire video_read_en;
-wire [7:0] cam_byte;
-wire cam_byte_valid;
 wire Sdr_init_ref_vld;
-//SD卡顶层控制模坄1�7
+//SD卡顶层控制模块
 sd_ctrl_top t1_sd_ctrl_top(
     .clk_ref                (clk_50m),
     .clk_ref_180deg         (clk_50m_180deg),
     .rst_n                  (rst_n),
-    //SD卡接叄1�7
+    //SD卡接口
     .sd_miso                (sd_miso),
     .sd_clk                 (sd_clk),
     .sd_cs                  (sd_cs),
     .sd_mosi                (sd_mosi),
-    // //用户写SD卡接叄1�7
-    // .wr_start_en            (1'b0),                      //不需要写入数捄1�7,写入接口赋����为0
-    // .wr_sec_addr            (32'b0),
-    // .wr_data                (16'b0),
-    // .wr_busy                (),
-    // .wr_req                 (),
-    // //用户读SD卡接叄1�7
+    //用户读SD卡接口
     .rd_start_en            (sd_rd_start_en),
     .rd_sec_addr            (sd_rd_sec_addr),
     .rd_busy                (sd_rd_busy),
@@ -240,11 +231,11 @@ sd_ctrl_top t1_sd_ctrl_top(
 
                                                       
 wire Sdr_init_done /* synthesis syn_keep=1 */;
-//读取SD卡图牄1�7
+//读取SD卡图片
 wire full_flag_sdr;
 sd_read_photo t2_sd_read_photo(
     .clk                   (clk_50m),
-    //系统初始化完成之各1�7,再开始从SD卡中读取图片
+    //系统初始化完成之后，再开始从SD卡中读取图片
     .rst_n                 (rst_n & Sdr_init_done & sd_init_done & sd_reset_rd_flag ), 
     .ddr_max_addr          (24'd307200),       
     .sd_sec_num            (16'd1801), 
@@ -275,7 +266,17 @@ sdram_top t3_sdram (
     .wr_done            (wr_done),
     .full_flag          (full_flag),
     .full_flag_sdr      (full_flag_sdr),
-    .udp_wrusedw        (udp_wrusedw)
+    .udp_wrusedw        (udp_wrusedw),
+    .video_read_req        (video_read_req),
+    .video_read_req_ack    (video_read_req_ack),
+    .video_read_en         (video_read_en),
+    .video_read_data       (video_read_data),
+
+    .cam_pclk              (cam_pclk),
+    .cam_write_req         (cam_write_req),
+    .cam_write_req_ack     (cam_write_req_ack),
+    .cam_write_en          (cam_write_en),
+    .cam_write_data        (cam_write_data)
     );
  
  
@@ -297,26 +298,6 @@ reg key4_sync0;
 reg key4_sync1;
 reg key4_prev;
 reg key4_reg;
-//always @(posedge ext_mem_clk or negedge rst_n) begin
-//    if (!rst_n) begin
-//        key4_sync0 <= 1'b1;
-//        key4_sync1 <= 1'b1;
-//        key4_prev  <= 1'b1;
-//        key4_reg   <= 1'b0; // 默认 TF 模式
-//    end else begin
-//        // 同步外部按键（假定按键为低有效，如按下产生下降沿）
-//        key4_sync0 <= key4_btn;
-//        key4_sync1 <= key4_sync0;
-//
-//        // 下降沿检测：前态为 1 且当前为 0 -> 触发翻转
-//        if (key4_prev && !key4_sync1) begin
-//            key4_reg <= ~key4_reg;
-//        end
-//
-//        key4_prev <= key4_sync1;
-//    end
-//end
-//
 
 parameter  V_CMOS_DISP = 11'd768;                  //CMOS分辨率--行
 parameter  H_CMOS_DISP = 11'd1024;                 //CMOS分辨率--列	
@@ -363,68 +344,34 @@ parameter  TOTAL_V_PIXEL = V_CMOS_DISP + 12'd504;
      .cam_write_en(cam_write_en),
      .cam_write_data(cam_write_data)
  );
- wire ext_mem_clk_sft;
- frame_read_write frame_read_write_m0(
-     .mem_clk					(ext_mem_clk),
-     .rst						(~rst_n),
-     .Sdr_init_done				(Sdr_init_done),
-     .Sdr_init_ref_vld			(Sdr_init_ref_vld),
-     .Sdr_busy					(Sdr_busy),
-     
-     .App_rd_en					(App_rd_en),
-     .App_rd_addr				(App_rd_addr),
-     .Sdr_rd_en					(Sdr_rd_en),
-     .Sdr_rd_dout				(Sdr_rd_dout),
-     
-     .read_clk                   (video_clk           ),
- 	.read_req                   (video_read_req           ),
- 	.read_req_ack               (video_read_req_ack       ),
- 	.read_finish                (                   ),
- 	.read_addr_0                (24'd0              ), //first frame base address is 0
- 	.read_addr_1                (24'd0         ),
- 	.read_addr_2                (24'd0              ),
- 	.read_addr_3                (24'd0              ),
- 	.read_addr_index            (2'd0               ), //use only read_addr_0
- 	.read_len                   (24'd786432         ), //frame size//24'd786432
- 	.read_en                    (video_read_en            ),
- 	.read_data                  (video_read_data          ),
-     
-     .App_wr_en					(App_wr_en),
-     .App_wr_addr				(App_wr_addr),
-     .App_wr_din					(App_wr_din),
-     .App_wr_dm					(App_wr_dm),
-     
-     .write_clk                  (cam_pclk        ),
- 	.write_req                  (cam_write_req        ),
- 	.write_req_ack              (cam_write_req_ack    ),
- 	.write_finish               (                 ),
- 	.write_addr_0               (24'd0            ),
- 	.write_addr_1               (24'd0       ),
- 	.write_addr_2               (24'd0            ),
- 	.write_addr_3               (24'd0            ),
- 	.write_addr_index           (2'd0             ), //use only write_addr_0
- 	.write_len                  (24'd786432       ), //frame size
- 	.write_en                   (cam_write_en         ),
- 	.write_data                 (cam_write_data       )
- );
  
- wire [8:0] sdr2udp_rdusedw;
- wire [31:0] sdr2udp_dout;
- wire  sdr2udp_re;
+wire [7:0] cam_byte;
+wire       cam_byte_valid;
+wire       cam_byte_last;
+wire [31:0] camser_word;
+wire        camser_word_valid;
+wire reset_n_udp;
+wire reset_n_memclk;
+assign reset_n_memclk = rst_n & Sdr_init_done;
+assign reset_n_udp    = rst_n & Sdr_init_done;  
+assign clk_udp= udp_clk;
+wire [8:0] sdr2udp_rdusedw;
+wire [31:0] sdr2udp_dout;
+wire  sdr2udp_re;
   
- // 扩展并映射1�7
+ // 扩展并映射
  assign sdr2udp_dout    = {8'h00, Sdr_rd_dout};     // 24->32 拓宽
- assign sdr2udp_rdusedw = udp_wrusedw[8:0];         // 佄1�79位作丄1�7 usedw
- // sdr2udp_re 甄1�7 cam_to_udp_serializer 的1�7 fifo_re 驱动刄1�7 Sdr_rd_en
+ assign sdr2udp_rdusedw = udp_wrusedw[8:0];         // 取9位作为 usedw
+ // sdr2udp_re 连接 cam_to_udp_serializer 的 fifo_re 驱动 Sdr_rd_en
 
  assign sdr2udp_re = camser_fifo_re;
  wire cam_sdr_read_req;
  assign cam_sdr_read_req = camser_fifo_re  ;
  assign clk_udp= udp_clk;
 
- // ========== 帧边畄1�7 / 帧长度（占位＄1�7 ==========
- // 说明：建议在写侧（像素域或写兄1�7 SDRAM 时）生成帧长度或 SOF/EOF 并跨域传递����1�7
- // 下面为简化计数����辑，需用真实跨域帧结束信号替换 cam_frame_end_pulse〄1�7
+ // ========== 帧边界 / 帧长度（占位） ==========
+ // 说明：建议在写侧（像素域或写入 SDRAM 时）生成帧长度或 SOF/EOF 并跨域传递
+ // 下面为简化计数逻辑，需用真实跨域帧结束信号替换 cam_frame_end_pulse
  reg [15:0] cam_frame_len_r;
  reg        cam_frame_done_r;
  reg [15:0] cam_frame_len_count;
@@ -452,20 +399,7 @@ assign sel_cam = 1'b1;
      .app_tx_data_length (app_tx_data_length_src),
      .app_tx_data_done   (app_tx_data_done_src)
  );
-wire [8:0] sdr2udp_rdusedw;
-wire [23:0] Sdr_rd_dout ;
-wire [11:0] udp_wrusedw;    
-wire rst_n ;    
-wire cam_sdr_read_req;
-assign cam_sdr_read_req = camser_fifo_re  ;
-wire  sdr2udp_re;
-assign sdr2udp_dout    = {8'h00, Sdr_rd_dout};     // 24->32 拓宽
-assign sdr2udp_rdusedw = udp_wrusedw[8:0]; 
-wire reset_n_udp;
-wire reset_n_memclk;
-assign reset_n_memclk = rst_n & Sdr_init_done;
-assign reset_n_udp    = rst_n & Sdr_init_done;  
-assign clk_udp= udp_clk;
+
 pulse_toggle_sync u_cam_req_sync (
     .src_clk  (clk_udp),
     .src_rst_n(reset_n_udp),
@@ -491,12 +425,8 @@ pulse_toggle_sync u_frame_end_sync (
      .cam_data       (camser_word),
      .cam_data_valid (camser_word_valid)
  );
- // ========== 32-bit -> 8-bit 字节序列匄1�7 ==========
- wire [7:0] cam_byte;
- wire       cam_byte_valid;
- wire       cam_byte_last;
- wire [31:0] camser_word;
- wire        camser_word_valid;
+ // ========== 32-bit -> 8-bit 字节序列化 ==========
+
  cam_word_to_bytes t5 (
      .clk            (clk_udp),
      .rst_n          (reset_n_udp),
@@ -550,18 +480,18 @@ begin
         soft_reset_cnt<=soft_reset_cnt;
 end
 
-// 第二个版本的缓冲区����辑
-reg [71:0] led_buffer;  // LED模式数据缓冲匄1�7
+// 第二个版本的缓冲区逻辑
+reg [71:0] led_buffer;  // LED模式数据缓冲区
 reg [71:0] seg_buffer;  // 数码管模式数据缓冲区
-reg led_buffer_valid;   // LED缓冲区有效标忄1�7
+reg led_buffer_valid;   // LED缓冲区有效标志
 reg seg_buffer_valid;   // 数码管缓冲区有效标志
-reg current_buffer;     // 当前活跃缓冲匄1�7: 0=LED, 1=数码箄1�7
-reg [3:0] byte_cnt;     // 计数0-8，共9个字芄1�7
+reg current_buffer;     // 当前活跃缓冲区: 0=LED, 1=数码管
+reg [3:0] byte_cnt;     // 计数0-8，共9个字节
 
 always @(posedge udp_clk or negedge rst_n_v2) begin
     if(!rst_n_v2) begin
         byte_cnt <= 4'b0;
-        current_buffer <= 1'b0; // 默认LED缓冲匄1�7
+        current_buffer <= 1'b0; // 默认LED缓冲区
         led_buffer_valid <= 1'b0;
         seg_buffer_valid <= 1'b0;
         led_buffer <= 72'h0;
@@ -573,18 +503,18 @@ always @(posedge udp_clk or negedge rst_n_v2) begin
         
         if (app_rx_data_valid) begin
             if (byte_cnt < 9) begin
-                // 在第丢�个字节检测模弄1�7
+                // 在第一个字节检测模式
                 if (byte_cnt == 0) begin
                     case (app_rx_data)
                         8'h55: current_buffer <= 1'b0; // LED模式
-                        8'hAA: current_buffer <= 1'b1; // 数码管模弄1�7
+                        8'hAA: current_buffer <= 1'b1; // 数码管模式
                         default: current_buffer <= current_buffer;
                     endcase
                 end
                 
-                // 存储当前字节到对应位罄1�7
+                // 存储当前字节到对应位置
                 if (current_buffer == 1'b0) begin
-                    // 存储到LED缓冲匄1�7
+                    // 存储到LED缓冲区
                     case(byte_cnt)
                         0: led_buffer[71:64] <= app_rx_data;
                         1: led_buffer[63:56] <= app_rx_data;
@@ -597,7 +527,7 @@ always @(posedge udp_clk or negedge rst_n_v2) begin
                         8: led_buffer[7:0]   <= app_rx_data;
                     endcase
                 end else begin
-                    // 存储到数码管缓冲匄1�7
+                    // 存储到数码管缓冲区
                     case(byte_cnt)
                         0: seg_buffer[71:64] <= app_rx_data;
                         1: seg_buffer[63:56] <= app_rx_data;
@@ -902,7 +832,7 @@ end
 //============================================================
 // 参数配置逻辑
 //============================================================
-//霢�配置的客户端接口（初始默认����）
+//暂配置的客户端接口（初始默认值）
 assign  tx_stop    = 1'b0;
 assign  tx_ifg_val = 8'h00;
 assign  pause_req  = 1'b0;
@@ -918,10 +848,10 @@ assign  unicast_address   = {   LOCAL_MAC_ADDRESS[7:0],
                             };
 
 
-assign  mac_cfg_vector    = {1'b0,2'b00,TRI_speed,8'b00000010,7'b0000010}; //地址过滤模式、流控配置��������度配置、接收器配置、发送器配置
-//assign  mac_cfg_vector    = {1'b0,2'b00,2'b10,8'b00000010,7'b0000010}; //地址过滤模式、流控配置��������度配置、接收器配置、发送器配置
-//assign  mac_cfg_vector    = {1'b0,2'b00,2'b01,8'b00000010,7'b0000010}; //地址过滤模式、流控配置��������度配置、接收器配置、发送器配置
-//assign  mac_cfg_vector    = {1'b0,2'b00,2'b00,8'b00000010,7'b0000010}; //地址过滤模式、流控配置��������度配置、接收器配置、发送器配置
+assign  mac_cfg_vector    = {1'b0,2'b00,TRI_speed,8'b00000010,7'b0000010}; //地址过滤模式、流控配置、速度配置、接收器配置、发送器配置
+//assign  mac_cfg_vector    = {1'b0,2'b00,2'b10,8'b00000010,7'b0000010}; //地址过滤模式、流控配置、速度配置、接收器配置、发送器配置
+//assign  mac_cfg_vector    = {1'b0,2'b00,2'b01,8'b00000010,7'b0000010}; //地址过滤模式、流控配置、速度配置、接收器配置、发送器配置
+//assign  mac_cfg_vector    = {1'b0,2'b00,2'b00,8'b00000010,7'b0000010}; //地址过滤模式、流控配置、速度配置、接收器配置、发送器配置
 
 //-----------------------------------------------------
 //test dynamic_local_ip_address
@@ -935,7 +865,7 @@ reg [7:0] cnt1;
 wire      end_cnt1;
 wire      add_cnt1;
 
-//计数噄1�72
+//计数器
  always @(posedge udp_clk or negedge sys_rst_n_2)begin
      if(!sys_rst_n_2)begin
          cnt0 <= 0;
@@ -1021,9 +951,9 @@ app u1_app (
     .app_rx_data                (app_rx_data            ), 
     .app_rx_data_length         (app_rx_data_length     ), 
     .app_rx_port_num            (app_rx_port_num        ),
-    .VGA_HSYNC	                (VGA_HSYNC              ),
-	.VGA_VSYNC 	                (VGA_VSYNC              ),
-	.VGA_D                      (VGA_D                  ),
+    .VGA_HSYNC                  (VGA_HSYNC              ),
+    .VGA_VSYNC                  (VGA_VSYNC              ),
+    .VGA_D                      (VGA_D                  ),
     .rd_en                      (rd_en                  ),
     .VGA_EN                     (VGA_EN)
 );      
@@ -1105,7 +1035,7 @@ udp_data_tpg u1_udp_data_tpg(
     .tpg_data_enable    (phy_reset          ),
     .tpg_data_header0   (16'haabb           ),//帧头0
     .tpg_data_header1   (16'hccdd           ),//帧头1
-    .tpg_data_type      (16'ha8b8           ),//数据帧类垄1�7
+    .tpg_data_type      (16'ha8b8           ),//数据帧类型
     .tpg_data_length    (16'h00ff           ),//数据长度500
     .tpg_data_num       (16'h000a           ),//产生的帧个数10
     .tpg_data_ifg       (8'd130             )
@@ -1146,33 +1076,6 @@ udp_loopback#(
     .udp_data_length            (udp_data_length        )   
 );
 
-
-// udp_loopback#(
-//    .DEVICE(DEVICE)
-// )
-// u2_udp_loopback
-// (
-//    .app_rx_clk                 (udp_clk                ),
-//    .app_tx_clk                 (udp_clk                ),
-//    .reset                      (reset                 ),//reset
-    
-//    `ifdef UDP_LOOP_BACK    
-//    .app_rx_data                (app_rx_data            ),
-//    .app_rx_data_valid          (app_rx_data_valid      ),
-//    .app_rx_data_length         (app_rx_data_length     ),
-//    `else   
-//    .app_rx_data                (tpg_data               ),
-//    .app_rx_data_valid          (tpg_data_valid         ),
-//    .app_rx_data_length         (tpg_data_udp_length    ),
-//    `endif              
-    
-//    .udp_tx_ready               (udp_tx_ready           ),
-//    .app_tx_ack                 (app_tx_ack             ),
-//    .app_tx_data                (app_tx_data            ),
-//    .app_tx_data_request        (app_tx_data_request    ),
-//    .app_tx_data_valid          (app_tx_data_valid      ),
-//    .udp_data_length            (udp_data_length        )   
-// );
 //------------------------------------------------------------  
 //UDP
 //------------------------------------------------------------       
@@ -1253,7 +1156,7 @@ u4_trimac_block
     .rx_status_vld        (                         ),
 //  .tri_speed            (tri_speed                ),//output
     .tx_clk               (tx_clk_int               ),//output  125M
-    .tx_clk_en            (tx_clk_en_int            ),//output  1    12.5M  1.25M 占空比不寄1�7
+    .tx_clk_en            (tx_clk_en_int            ),//output  1    12.5M  1.25M 占空比不保证
     .tx_data              (tx_data                  ),
     .tx_data_en           (tx_valid                 ),
     .tx_rdy               (tx_rdy                   ),//temac_tx_ready

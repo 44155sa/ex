@@ -2,7 +2,6 @@
 module udp_source_mux(
     input  wire         clk,
     input  wire         reset_n,
-    input               mem_clk,
     input  wire         sel_cam,
     input               Sdr_init_done,
     // 摄像头：8-bit bytes

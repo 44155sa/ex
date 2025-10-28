@@ -43,7 +43,19 @@ module sdram_top(
     output             [`BA_WIDTH-1: 0]      SDR_BA,
     output             [`ROW_WIDTH-1:0]      SDR_ADDR,
     output             [`DM_WIDTH-1:0]       SDR_DM,
-    inout              [`DATA_WIDTH-1:0]     SDR_DQ
+    output                                   video_clk,
+    inout              [`DATA_WIDTH-1:0]     SDR_DQ,
+    input                                    video_read_req,       // request from top/frame consumer
+    output                                   video_read_req_ack,   // ack back to requester
+    output                                   video_read_en,        // data valid out (to top)
+    output     [31:0]                        video_read_data,      // read data out (32-bit)
+
+    // camera / frame write interface (exposed to top)
+    input                                    cam_pclk,             // camera pixel clock (from top)
+    input                                    cam_write_req,        // frame write request (from camera pipeline)
+    output                                   cam_write_req_ack,    // ack to camera pipeline
+    input                                    cam_write_en,         // per-word write enable (from camera pipeline)
+    input      [31:0]                        cam_write_data    
     );
 
     // Internal signals
@@ -55,13 +67,31 @@ module sdram_top(
     wire                                Sdr_init_ref_vld;
     wire                                Sdr_busy;
 
-    // app <-> sdr interface wires
-    wire                                App_wr_en;
-    wire               [`ADDR_WIDTH-1: 0]App_wr_addr;
-    wire               [`DM_WIDTH-1: 0] App_wr_dm;
-    wire               [`DATA_WIDTH-1: 0]App_wr_din;
-    wire                                App_rd_en;
-    wire               [`ADDR_WIDTH-1: 0]App_rd_addr;
+    wire        App_wr_en_app;
+wire [ `ADDR_WIDTH-1:0 ] App_wr_addr_app;
+wire [ `DM_WIDTH-1:0 ]   App_wr_dm_app;
+wire [ `DATA_WIDTH-1:0 ] App_wr_din_app;
+
+wire        App_rd_en_app;
+wire [ `ADDR_WIDTH-1:0 ] App_rd_addr_app;
+
+// frame_read_write (或 frame_fifo_write) 的本地信号 (来源 2)
+wire        App_wr_en_frame;
+wire [ `ADDR_WIDTH-1:0 ] App_wr_addr_frame;
+wire [ `DM_WIDTH-1:0 ]   App_wr_dm_frame;
+wire [ `DATA_WIDTH-1:0 ] App_wr_din_frame;
+
+wire        App_rd_en_frame;
+wire [ `ADDR_WIDTH-1:0 ] App_rd_addr_frame;
+
+// 仲裁输出（单一路由到 sdr_as_ram）
+reg         App_wr_en_mux;
+reg [ `ADDR_WIDTH-1:0 ] App_wr_addr_mux;
+reg [ `DM_WIDTH-1:0 ]   App_wr_dm_mux;
+reg [ `DATA_WIDTH-1:0 ] App_wr_din_mux;
+
+reg         App_rd_en_mux;
+reg [ `ADDR_WIDTH-1:0 ] App_rd_addr_mux;
 
     // ------------------------------------------------------------------
     // PLL: derive any shifted clocks required by vendor sdr_as_ram instance
@@ -80,6 +110,9 @@ module sdram_top(
     // Combine reset with PLL lock to avoid releases before PLL stable
     assign Rst_n = rst_n & lock;
     assign Rst   = ~Rst_n;
+// Capture frame module requests for arbitration
+assign frame_write_req = cam_write_req;  // frame_read_write exposes write_req; use cam_write_req from top connection
+assign frame_read_req  = video_read_req; // frame_read_write exposes read_req -> video_read_req
 
     // ------------------------------------------------------------------
     // app_wrrd: converts incoming sdr_data (from e.g. SD card or camera writer)
@@ -90,28 +123,98 @@ module sdram_top(
     // ------------------------------------------------------------------
     app_wrrd u1_app_wrrd(
         .clk                (ext_mem_clk),          // mem domain clock
-        .sd_clk             (sd_clk),               // sd clock (kept)
-        .rst_n              (Rst_n),
-        .full_flag_net      (full_flag),
-        .Sdr_init_done      (Sdr_init_done),
-        .Sdr_init_ref_vld   (Sdr_init_ref_vld),
-        .sdr_data_valid     (sdr_data_valid),
-        .sdr_data           (sdr_data),
-        .App_wr_en          (App_wr_en),
-        .App_wr_addr        (App_wr_addr),
-        .App_wr_dm          (App_wr_dm),
-        .App_wr_din         (App_wr_din),
-        .wr_done            (wr_done),
-        .App_rd_en          (App_rd_en),
-        .App_rd_addr        (App_rd_addr),
-        .Sdr_rd_en          (Sdr_rd_en),
-        .Sdr_rd_dout        (Sdr_rd_dout),
-        .Sdr_busy           (Sdr_busy),
-        .full_flag          (full_flag_sdr),
-        .udp_wrusedw        (udp_wrusedw)
-        // .Check_ok(...)
+    .rst_n              (Rst_n),
+    .sd_clk             (sd_clk),
+    .Sdr_init_done      (Sdr_init_done),
+    .Sdr_init_ref_vld   (Sdr_init_ref_vld),
+    .full_flag_net      (full_flag),
+    .sdr_data_valid     (sdr_data_valid),
+    .sdr_data           (sdr_data),
+    // app interface (rename to *_app)
+    .App_wr_en          (App_wr_en_app),
+    .App_wr_addr        (App_wr_addr_app),
+    .App_wr_dm          (App_wr_dm_app),
+    .App_wr_din         (App_wr_din_app),
+    .wr_done            (wr_done),
+    .App_rd_en          (App_rd_en_app),
+    .App_rd_addr        (App_rd_addr_app),
+    .Sdr_rd_en          (Sdr_rd_en),        // Sdr_rd_en will be driven by sdr_as_ram and routed to both modules
+    .Sdr_rd_dout        (Sdr_rd_dout),
+    .Sdr_busy           (Sdr_busy),
+    .full_flag          (full_flag_sdr),
+    .udp_wrusedw        (udp_wrusedw)
     );
+    frame_read_write frame_read_write_m0(
+     .rst                    (~rst_n),
+    .mem_clk                (ext_mem_clk),
+    .Sdr_init_done          (Sdr_init_done),
+    .Sdr_init_ref_vld       (Sdr_init_ref_vld),
+    .Sdr_busy               (Sdr_busy),
 
+    // frame_read_write 的 read-side (它会产生 App_rd_en/addr)
+    .App_rd_en              (App_rd_en_frame),
+    .App_rd_addr            (App_rd_addr_frame),
+
+    // connect SDR read path into frame_read_write
+    .Sdr_rd_en              (Sdr_rd_en),
+    .Sdr_rd_dout            (Sdr_rd_dout),
+
+    // read clk/domain to frame_read_write (video domain)
+    .read_clk               (video_clk),
+    .read_req               (video_read_req),
+    .read_req_ack           (video_read_req_ack),
+    .read_finish            (),
+    .read_addr_0            (24'd0),
+    .read_addr_1            (24'd0),
+    .read_addr_2            (24'd0),
+    .read_addr_3            (24'd0),
+    .read_addr_index        (2'd0),
+    .read_len               (24'd786432),
+    .read_en                (video_read_en),
+    .read_data              (video_read_data),
+
+    // write side from frame pipeline (camera)
+    .App_wr_en              (App_wr_en_frame),
+    .App_wr_addr            (App_wr_addr_frame),
+    .App_wr_din             (App_wr_din_frame),
+    .App_wr_dm              (App_wr_dm_frame),
+
+    .write_clk              (cam_pclk),
+    .write_req              (cam_write_req),
+    .write_req_ack          (cam_write_req_ack),
+    .write_finish           (),
+    .write_addr_0           (24'd0),
+    .write_addr_1           (24'd0),
+    .write_addr_2           (24'd0),
+    .write_addr_3           (24'd0),
+    .write_addr_index       (2'd0),
+    .write_len              (24'd786432),
+    .write_en               (cam_write_en),
+    .write_data             (cam_write_data)
+ );
+ always @(*) begin
+    // write path arbitration
+    if (frame_write_req) begin
+        App_wr_en_mux  = App_wr_en_frame;
+        App_wr_addr_mux = App_wr_addr_frame;
+        App_wr_dm_mux   = App_wr_dm_frame;
+        App_wr_din_mux  = App_wr_din_frame;
+    end else begin
+        App_wr_en_mux  = App_wr_en_app;
+        App_wr_addr_mux = App_wr_addr_app;
+        App_wr_dm_mux   = App_wr_dm_app;
+        App_wr_din_mux  = App_wr_din_app;
+    end
+
+    // read path arbitration
+    if (frame_read_req) begin
+        App_rd_en_mux  = App_rd_en_frame;
+        App_rd_addr_mux = App_rd_addr_frame;
+    end else begin
+        App_rd_en_mux  = App_rd_en_app;
+        App_rd_addr_mux = App_rd_addr_app;
+    end
+end
     // ------------------------------------------------------------------
     // sdr_as_ram instance: vendor / project provided SDRAM controller wrapper
     // Uses ext_mem_clk as Sdr_clk and Clk_sft from PLL for the "sft" clock path.
@@ -128,13 +231,13 @@ module sdram_top(
 
         .App_ref_req        (1'b0),
 
-        .App_wr_en          (App_wr_en),
-        .App_wr_addr        (App_wr_addr),
-        .App_wr_dm          (App_wr_dm),
-        .App_wr_din         (App_wr_din),
+        .App_wr_en          (App_wr_en_mux),
+        .App_wr_addr        (App_wr_addr_mux),
+        .App_wr_dm          (App_wr_dm_mux),
+        .App_wr_din         (App_wr_din_mux),
 
-        .App_rd_en          (App_rd_en),
-        .App_rd_addr        (App_rd_addr),
+        .App_rd_en          (App_rd_en_mux),
+        .App_rd_addr        (App_rd_addr_mux),
         .Sdr_rd_en          (Sdr_rd_en),
         .Sdr_rd_dout        (Sdr_rd_dout),
 
